@@ -14,6 +14,7 @@ import pytest
 import flask
 from minitwit import minitwit
 import requests
+import json
 
 @pytest.fixture
 def client():
@@ -47,7 +48,8 @@ def login(client, username, password):
 	return requests.get('http://localhost:5000/api/account/verify_credentials', params=myParams)
 
 def logout(client):
-	return requests.delete('http://localhost:5000/api/account/verify_credentials')
+	rv = requests.delete('http://localhost:5000/api/account/verify_credentials')
+	return rv
 
 #Test showing the timeline for authenticated user
 def show_home_timeline(client):
@@ -63,25 +65,44 @@ def show_user_messages(client, username):
 
 #Test adding authenticated user to the followers list of specified user
 def add_auth_follower(client, username):
-	return requests.post('http://localhost:5000/api/friendship/create', data={"username" : username})
+	myParams = {"username" : username}
+	headers = {'Content-type': 'application/json'}
+	return requests.post('http://localhost:5000/api/friendship/create', data=json.dumps(myParams), headers=headers)
 
 #Test remove authenticated user from followers of 'username'
 def remove_follower(client, username):
-	return requests.delete('http://localhost:5000/api/friendships/delete/<username>', username)
+	return requests.delete('http://localhost:5000/api/friendships/delete/<username>', [username])
 
 #Test posting a new message from authenticated user
 def post_new_message(client, text):
-	return requests.post('http://localhost:5000/api/statuses/update', [{"text" : text}])
+	myParams = {"text" : "text"}
+	headers = {'Content-type': 'application/json'}
+	return requests.post('http://localhost:5000/api/statuses/update', data=json.dumps(myParams), headers=headers)
 
-def test_register_login(client):
+def test_register_login_logout(client):
 	result = register(client, "danial", "danial")
 	assert result.status_code == 200
 	result = login(client, "danial", "danial")
 	assert result.status_code == 200
 	result = show_home_timeline(client)
+	result = logout(client)
+	assert result.status_code == 200
+
+#def test_login_add_message(client):
+#	result = login(client, "danial", "danial")
+#	assert result.status_code == 200
+#	result = post_new_message(client, "pyTest suite")
+#	assert result.status_code == 200
+#	result = show_home_timeline(client)
+#	assert result.status_code == 200
+#	result = show_public_timeline(client)
+#	assert result.status_code == 200
 #	result = logout(client)
 #	assert result.status_code == 200
 
-#def test_login_logout(client)
-
-
+#def test_follow_unfollow(client):
+#	result = login(client, "danial", "danial")
+#	assert result.status_code == 200
+#	result = add_auth_follower(client, 'user1')
+#	assert result.status_code == 200
+	
