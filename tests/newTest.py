@@ -48,12 +48,13 @@ def login(client, username, password):
 	return requests.get('http://localhost:5000/api/account/verify_credentials', params=myParams)
 
 def logout(client):
-	rv = requests.delete('http://localhost:5000/api/account/verify_credentials')
+	requests.delete('http://localhost:5000/api/account/verify_credentials')
 	return rv
 
 #Test showing the timeline for authenticated user
 def show_home_timeline(client):
-	return requests.get('http://localhost:5000/api/statuses/home_timeline')
+	requests.get('http://localhost:5000/api/statuses/home_timeline')
+#	return requests.get('http://localhost:5000/api/statuses/home_timeline')
 
 #Test showing public timeline for everyone
 def show_public_timeline(client):
@@ -77,16 +78,17 @@ def remove_follower(client, username):
 def post_new_message(client, text):
 	myParams = {"text" : "text"}
 	headers = {'Content-type': 'application/json'}
-	return requests.post('http://localhost:5000/api/statuses/update', data=json.dumps(myParams), headers=headers)
+	return requests..post('http://localhost:5000/api/statuses/update', data=json.dumps(myParams), headers=headers)
 
 def test_register_login_logout(client):
-	result = register(client, "danial", "danial")
-	assert result.status_code == 200
-	result = login(client, "danial", "danial")
-	assert result.status_code == 200
+#	result = register(client, "danial", "danial")
+#	assert result.status_code == 200
+	login(client, "danial", "danial")
+#	assert result.status_code == 200
 	result = show_home_timeline(client)
-	result = logout(client)
-	assert result.status_code == 200
+#	assert result.status_code == 200
+#	result = logout(client)
+#	assert result.status_code == 200
 
 #def test_login_add_message(client):
 #	result = login(client, "danial", "danial")
