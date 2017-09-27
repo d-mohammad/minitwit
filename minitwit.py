@@ -34,9 +34,13 @@ app.config.from_envvar('MINITWIT_SETTINGS', silent=True)
 #tested
 @app.route('/api/statuses/home_timeline', methods=['GET'])
 def homeTimeline():
+	print(session.get('user_id'))
 	if not g.user:
-		return jsonify({"error: Unauthorized"}), 401
-	rv=query_db('select message.*, user.* from message, user where message.author_id = user.user_id and (user.user_id = ? or user.user_id in (select whom_id from follower where who_id = ?)) order by 				message.pub_date desc limit ?''', [session['user_id'], session['user_id'], PER_PAGE])
+		return jsonify({"error" : "Unauthorized"}), 401
+
+	rv=query_db('''select message.*, user.* from message, user where message.author_id = user.user_id and 
+			(user.user_id = ? or user.user_id in (select whom_id from follower where who_id = ?)) 
+			order message.pub_date desc limit ?''', [session['user_id'], session['user_id'], PER_PAGE])
 	result = ([tuple(row) for row in rv])
 	return jsonify(result), 200
 
@@ -104,6 +108,7 @@ def delete_friendship(username):
 #tested
 @app.route('/api/statuses/update', methods=['POST'])
 def addMessage():
+
 	db = get_db()
 	content = request.get_json()
 	message = content.get('text')
@@ -113,7 +118,6 @@ def addMessage():
 
 	return jsonify({"message" : message}), 200
 
-
 #tested
 #FIX SESSION POP ---- CAN STILL ACCESS USER AFTER POPPING
 @app.route('/api/account/verify_credentials', methods=['GET', 'DELETE'])
@@ -122,6 +126,7 @@ def verifyCredentials():
 	if (request.method =='GET'):
 		username = request.args.get('username',default=" ",type=str)
 		user_id = get_user_id(username)
+		print(user_id)
 		password = request.args.get('password',default=" ",type=str)
 
 		user = query_db('''select * from user where username = ?''', [username], one=True)
@@ -131,15 +136,14 @@ def verifyCredentials():
 		elif not check_password_hash(user['pw_hash'], password):
 			error = 'Invalid password'
 			return jsonify({"error" : "Unauthorized"}, 401)
-		else:	
+		else:
 			session['user_id'] = user_id
-			session.permanent = True
-			flash('You were logged in')
-			return session, 200;
-# 			return jsonify({"username": username, "password":password}), 200
+			session.modified = True
+ 			return jsonify({"username": username, "password":password}), 200
 		
 	elif (request.method == 'DELETE'):
-		session.pop(session['user_id'], None)
+		session.pop('user_id', None)
+
 		return jsonify({"status" : "deleted"}), 200
 	else:
 		return jsonify({"error" : "Method Not Allowed"}), 405
