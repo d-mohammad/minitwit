@@ -15,10 +15,9 @@ from sqlite3 import dbapi2 as sqlite3
 from hashlib import md5
 from datetime import datetime
 from flask import Flask, request, session, url_for, redirect, \
-     render_template, abort, g, flash, _app_ctx_stack, jsonify
+     render_template, abort, g, flash, _app_ctx_stack, jsonify, Response
 
 from werkzeug import check_password_hash, generate_password_hash
-
 
 # configuration
 DATABASE = '/tmp/minitwit.db'
@@ -35,8 +34,8 @@ app.config.from_envvar('MINITWIT_SETTINGS', silent=True)
 @app.route('/api/statuses/home_timeline', methods=['GET'])
 def homeTimeline():
 	print(session.get('user_id'))
-	if not g.user:
-		return jsonify({"error" : "Unauthorized"}), 401
+	#if not g.user:
+	#	return jsonify({"error" : "Unauthorized"}), 401
 
 	rv=query_db('''select message.*, user.* from message, user where message.author_id = user.user_id and 
 			(user.user_id = ? or user.user_id in (select whom_id from follower where who_id = ?)) 
@@ -47,7 +46,8 @@ def homeTimeline():
 #tested
 @app.route('/api/statuses/public_timeline', methods=['GET'])
 def publicTimeline():
-	rv = query_db('select message.*, user.* from message, user where message.author_id = user.user_id order by message.pub_date desc limit ?', [PER_PAGE])
+	rv = query_db('''select message.*, user.* from message, user where message.author_id = user.user_id order 
+		by message.pub_date desc limit ?''', [PER_PAGE])
 	return jsonify([tuple(row) for row in rv]), 200
 
 #tested
@@ -57,12 +57,13 @@ def userTimeline(username):
 	whom_id = get_user_id(username)
 
 	if profile_user is None:
-		return jsonify({"error: Not Found"}), 404
+		return jsonify({"status: Not Found"}), 404
 	if not g.user:
-		return jsonify({"error: Unauthorized"}), 401
+		return jsonify({"status: Unauthorized"}), 401
 
 	followed = query_db('select 1 from follower where follower.who_id = ? and follower.whom_id = ?', [session['user_id'], whom_id], one=True)
-	rv = query_db('select message.*, user.* from message, user where user.user_id = message.author_id and user.user_id = ? order by message.pub_date desc limit ?', [whom_id, PER_PAGE])
+	rv = query_db('''select message.*, user.* from message, user where user.user_id = message.author_id and 
+				user.user_id = ? order by message.pub_date desc limit ?''', [whom_id, PER_PAGE])
 	return jsonify([tuple(row) for row in rv]), 200
 
 #tested
@@ -75,14 +76,14 @@ def create_friendship():
 		whom_id = get_user_id(whom)
 
 		if not g.user:
-			return jsonify({"error: Unauthorized"}), 401
+			return jsonify({"status: Unauthorized"}), 401
 		if whom_id is None:
-			return jsonify({"error: Not Found"}), 404
+			return jsonify({"status: Not Found"}), 404
 
 		db.execute('insert into follower (who_id, whom_id) values (?, ?)', [session['user_id'], whom_id])
 		db.commit()
 	else:
-		return jsonify({"error: Method Not Allowed"}), 405
+		return jsonify({"status: Method Not Allowed"}), 405
 	
 	return jsonify({"username": whom, "followed" : "True"}),200
 
@@ -93,15 +94,16 @@ def delete_friendship(username):
 		db = get_db()
 		whom_id = get_user_id(username)
 
-		if not g.user:
-			return jsonify({"error: Unauthorized"}), 401
-		if whom_id is None:
-			return jsonify({"error: Not Found"}), 404
+#		if not g.user:
+#			return jsonify({"status: Unauthorized"}), 401
+#		if whom_id is None:
+#			return jsonify({"status: Not Found"}), 404
+#
 
 		db.execute('delete from follower where who_id=? and whom_id=?', [session['user_id'], whom_id])
 		db.commit()
 	else:
-		return jsonify({"error: Method Not Allowed"}), 405
+		return jsonify({"status: Method Not Allowed"}), 405
 
 	return jsonify({"username" : username, "followed" : "False"}), 200
 
@@ -126,27 +128,27 @@ def verifyCredentials():
 	if (request.method =='GET'):
 		username = request.args.get('username',default=" ",type=str)
 		user_id = get_user_id(username)
-		print(user_id)
 		password = request.args.get('password',default=" ",type=str)
 
 		user = query_db('''select * from user where username = ?''', [username], one=True)
 		if user is None:
 			error = 'Invalid username'
-			return jsonify({"error" : "Bad Request"}, 400)
+			return jsonify({"status" : "Bad Request"}, 400)
 		elif not check_password_hash(user['pw_hash'], password):
 			error = 'Invalid password'
-			return jsonify({"error" : "Unauthorized"}, 401)
+			return jsonify({"status" : "Unauthorized"}, 401)
 		else:
+			if session['user_id'] == user_id:
+				session.pop('user_id', None)
 			session['user_id'] = user_id
-			session.modified = True
  			return jsonify({"username": username, "password":password}), 200
-		
+			
 	elif (request.method == 'DELETE'):
 		session.pop('user_id', None)
 
 		return jsonify({"status" : "deleted"}), 200
 	else:
-		return jsonify({"error" : "Method Not Allowed"}), 405
+		return jsonify({"status" : "Method Not Allowed"}), 405
 
 def get_db():
     """Opens a new database connection if there is none yet for the
@@ -157,7 +159,6 @@ def get_db():
         top.sqlite_db = sqlite3.connect(app.config['DATABASE'])
         top.sqlite_db.row_factory = sqlite3.Row
     return top.sqlite_db
-
 
 @app.teardown_appcontext
 def close_database(exception):
