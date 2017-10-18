@@ -2,9 +2,7 @@
 """
     MiniTwit
     ~~~~~~~~
-
     A microblogging application written with Flask and sqlite3.
-
     :copyright: (c) 2015 by Armin Ronacher.
     :license: BSD, see LICENSE for more details.
 """
@@ -16,7 +14,7 @@ from hashlib import md5
 from datetime import datetime
 from flask import Flask, request, session, url_for, redirect, \
      render_template, abort, g, flash, _app_ctx_stack, jsonify, Response
-
+from flask_sessionstore import Session
 from werkzeug import check_password_hash, generate_password_hash
 
 # configuration
@@ -29,6 +27,30 @@ SECRET_KEY = b'_5#y2L"F4Q8z\n\xec]/'
 app = Flask('minitwit')
 app.config.from_object(__name__)
 app.config.from_envvar('MINITWIT_SETTINGS', silent=True)
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:////tmp/minitwit.db'
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = True
+app.config['BASIC_AUTH_USERNAME'] = 'john'
+app.config['BASIC_AUTH_PASSWORD'] = 'matrix'
+
+basic_auth = BasicAuth(app)
+Session(app)
+
+class BasicAuth(app=None):
+	def check_credentials(username, password):
+		user = query_db('''select * from user where username = ?''', username, one=True)
+		if (check_password_hash(user['pw_hash'], password):
+			return True;
+		else:
+			return False;
+
+@app.route('/set/')
+def set():
+    session['key'] = 'value'
+    return 'ok'
+
+@app.route('/get/')
+def get():
+    return session.get('key', 'not set')
 
 #tested
 @app.route('/api/statuses/home_timeline', methods=['GET'])
@@ -121,10 +143,10 @@ def addMessage():
 	return jsonify({"message" : message}), 200
 
 #tested
-#FIX SESSION POP ---- CAN STILL ACCESS USER AFTER POPPING
 @app.route('/api/account/verify_credentials', methods=['GET', 'DELETE'])
 def verifyCredentials():
 	db = get_db()
+	
 	if (request.method =='GET'):
 		username = request.args.get('username',default=" ",type=str)
 		user_id = get_user_id(username)
@@ -138,8 +160,6 @@ def verifyCredentials():
 			error = 'Invalid password'
 			return jsonify({"status" : "Unauthorized"}, 401)
 		else:
-			if session['user_id'] == user_id:
-				session.pop('user_id', None)
 			session['user_id'] = user_id
  			return jsonify({"username": username, "password":password}), 200
 			
