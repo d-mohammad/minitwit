@@ -11,13 +11,14 @@
 
 import time
 import json
-from sqlite3 import dbapi2 as sqlite3
 from hashlib import md5
 from datetime import datetime
 from flask import Flask, request, session, url_for, redirect, \
 	 render_template, abort, g, flash, _app_ctx_stack, jsonify, Response
 from werkzeug import check_password_hash, generate_password_hash
 from flask_pymongo import PyMongo
+from bson.objectid import ObjectId
+from bson import json_util
 
 # configuration
 DATABASE = '/tmp/minitwit.db'
@@ -31,107 +32,106 @@ app.config.from_object(__name__)
 app.config.from_envvar('MINITWIT_SETTINGS', silent=True)
 mongo = PyMongo(app)
 
-#tested
-@app.route('/api/statuses/home_timeline', methods=['GET'])
-def homeTimeline():
-	print(session.get('user_id'))
-	#if not g.user:
-	#	return jsonify({"error" : "Unauthorized"}), 401
-
-	rv=query_db('''select message.*, user.* from message, user where message.author_id = user.user_id and 
-			(user.user_id = ? or user.user_id in (select whom_id from follower where who_id = ?)) 
-			order message.pub_date desc limit ?''', [session['user_id'], session['user_id'], PER_PAGE])
-	result = ([tuple(row) for row in rv])
-	return jsonify(result), 200
-
-#tested
 @app.route('/api/statuses/public_timeline', methods=['GET'])
 def publicTimeline():
-	rv = query_db('''select message.*, user.* from message, user where message.author_id = user.user_id order 
-		by message.pub_date desc limit ?''', [PER_PAGE])
-	return jsonify([tuple(row) for row in rv]), 200
+	messages = list(mongo.db.message.find().sort('pub_date', -1))
+	return json.dumps(messages,default=json_util.default)
 
-#tested
+
+@app.route('/api/statuses/home_timeline', methods=['GET'])
+def homeTimeline():
+	if not session['user_id']:
+		return jsonify({"error" : "Unauthorized"}), 401
+	followed = mongo.db.follower.find_one(
+		{'who_id': ObjectId(session['user_id'])}, {'whom_id': 1})
+	messages = list(mongo.db.message.find(
+		{'$or': [
+			{'author_id': ObjectId(session['user_id'])},
+			{'author_id': {'$in': followed['whom_id']}}
+		]}).sort('pub_date', -1))
+	return json.dumps(messages,default=json_util.default)
+
 @app.route('/api/statuses/user_timeline/<username>', methods=['GET'])
 def userTimeline(username):
-	profile_user = query_db('select * from user where username = ?', [username])
+	profile_user = mongo.db.user.find_one({'username': username})
 	whom_id = get_user_id(username)
 
 	if profile_user is None:
-		return jsonify({"status: Not Found"}), 404
-	if not g.user:
-		return jsonify({"status: Unauthorized"}), 401
+		return jsonify({"status": "Not Found"}), 404
 
-	followed = query_db('select 1 from follower where follower.who_id = ? and follower.whom_id = ?', [session['user_id'], whom_id], one=True)
-	rv = query_db('''select message.*, user.* from message, user where user.user_id = message.author_id and 
-				user.user_id = ? order by message.pub_date desc limit ?''', [whom_id, PER_PAGE])
-	return jsonify([tuple(row) for row in rv]), 200
+	messages = list(mongo.db.message.find(
+		{'author_id': ObjectId(profile_user['_id'])}).sort('pub_date', -1))
 
-#tested
+	return json.dumps(messages,default=json_util.default)	
+
 @app.route('/api/friendships/create', methods=['POST'])
 def create_friendship():
 	if request.method == 'POST':
-		db = get_db()
 		content = request.get_json()
 		whom = content.get("username")
 		whom_id = get_user_id(whom)
 
-		if not g.user:
+		if session['user_id'] is None:
 			return jsonify({"status: Unauthorized"}), 401
 		if whom_id is None:
 			return jsonify({"status: Not Found"}), 404
 
-		db.execute('insert into follower (who_id, whom_id) values (?, ?)', [session['user_id'], whom_id])
-		db.commit()
+		mongo.db.follower.update(
+			{'who_id': ObjectId(session['user_id'])},
+			{'$push': {'whom_id': whom_id}}, upsert=True)
+
 	else:
-		return jsonify({"status: Method Not Allowed"}), 405
-	
+	   return jsonify({"status: Method Not Allowed"}), 405
+
 	return jsonify({"username": whom, "followed" : "True"}),200
 
-#tested
 @app.route('/api/friendships/delete/<username>', methods=['DELETE'])
 def delete_friendship(username):
 	if request.method == 'DELETE':
-		db = get_db()
 		whom_id = get_user_id(username)
 
-#		if not g.user:
-#			return jsonify({"status: Unauthorized"}), 401
-#		if whom_id is None:
-#			return jsonify({"status: Not Found"}), 404
-#
+		if session[user_id] is None:
+			return jsonify({"status: Unauthorized"}), 401
+		if whom_id is None:
+			return jsonify({"status: Not Found"}), 404
 
-		db.execute('delete from follower where who_id=? and whom_id=?', [session['user_id'], whom_id])
-		db.commit()
+		mongo.db.follower.update(
+			{'who_id': ObjectId(session['user_id'])},
+			{'$pull': {'whom_id': whom_id}})
 	else:
 		return jsonify({"status: Method Not Allowed"}), 405
 
 	return jsonify({"username" : username, "followed" : "False"}), 200
 
-#tested
 @app.route('/api/statuses/update', methods=['POST'])
 def addMessage():
-
-	db = get_db()
 	content = request.get_json()
 	message = content.get('text')
+	user = mongo.db.user.find_one({'_id': ObjectId(session['user_id'])})
 
-	db.execute('insert into message (author_id, text, pub_date) values (?, ?, ?)', [session['user_id'], message, int(time.time())])
-	db.commit()
+	if user is None:
+		return jsonify({"status: Not Found"}), 404
+	if session['user_id'] is None:
+		return jsonify({"status: Unauthorized"}), 401
+
+	mongo.db.message.insert(
+            {'author_id': ObjectId(session['user_id']),
+             'email': user['email'],
+             'username': user['username'],
+             'text': message,
+             'pub_date': int(time.time())})
 
 	return jsonify({"message" : message}), 200
 
-#tested
-#FIX SESSION POP ---- CAN STILL ACCESS USER AFTER POPPING
 @app.route('/api/account/verify_credentials', methods=['GET', 'DELETE'])
 def verifyCredentials():
-	db = get_db()
 	if (request.method =='GET'):
 		username = request.args.get('username',default=" ",type=str)
 		user_id = get_user_id(username)
 		password = request.args.get('password',default=" ",type=str)
 
-		user = query_db('''select * from user where username = ?''', [username], one=True)
+		user = mongo.db.user.find_one({'username': username})
+
 		if user is None:
 			error = 'Invalid username'
 			return jsonify({"status" : "Bad Request"}, 400)
@@ -139,73 +139,73 @@ def verifyCredentials():
 			error = 'Invalid password'
 			return jsonify({"status" : "Unauthorized"}, 401)
 		else:
-			if session['user_id'] == user_id:
-				session.pop('user_id', None)
-			session['user_id'] = user_id
+			session['user_id'] = str(user_id)
 			return jsonify({"username": username, "password":password}), 200
 			
 	elif (request.method == 'DELETE'):
+		print session['user_id']
 		session.pop('user_id', None)
-
 		return jsonify({"status" : "deleted"}), 200
 	else:
 		return jsonify({"status" : "Method Not Allowed"}), 405
 
-def get_db():
-	"""Opens a new database connection if there is none yet for the
-	current application context.
-	"""
-	top = _app_ctx_stack.top
-	if not hasattr(top, 'sqlite_db'):
-		top.sqlite_db = sqlite3.connect(app.config['DATABASE'])
-		top.sqlite_db.row_factory = sqlite3.Row
-	return top.sqlite_db
-
-@app.teardown_appcontext
-def close_database(exception):
-	"""Closes the database again at the end of the request."""
-	top = _app_ctx_stack.top
-	if hasattr(top, 'sqlite_db'):
-		top.sqlite_db.close()
-
-
-def init_db():
-	"""Initializes the database."""
-	db = get_db()
-	with app.open_resource('schema.sql', mode='r') as f:
-		db.cursor().executescript(f.read())
-	db.commit()
-
-
-@app.cli.command('initdb')
-def initdb_command():
-	"""Creates the database tables."""
-	init_db()
-	print('Initialized the database.')
-
 def populate_db():
-	db = get_db()
-	with app.open_resource('population.sql', mode='r') as f:
-		db.cursor().executescript(f.read())
-	db.commit()
+	result = mongo.db.message.delete_many({})
+	print result.deleted_count , "messages deleted"
+	mongo.db.user.drop()
+	print result.deleted_count , "users deleted"
+	#password = asd
+	#pbkdf2:sha256:50000$VkXoNh0W$74f25225aab278pbkdf2:sha256:50000$VkXoNh0W$74f25225aab278bf3ba83921af34604574d5246993429ec26903f5b9875ac18fbf3ba83921af34604574d5246993429ec26903f5b9875ac18f
+	result = mongo.db.user.insert(
+				{'username': 'testuser1',
+				 'email': 'test1@email.com',
+				 'pw_hash': 'pbkdf2:sha256:50000$OsYsSQ2F$be40fe67dc85114d7de5dcafa66df7fbdfdee5ab89c7609cc8455e79564eab1b'})
+	mongo.db.message.insert(
+			{'author_id': ObjectId(result),
+			 'email': 'test1@email.com',
+			 'username': 'testuser1',
+			 'text': 'I LOVE THIS PROJECT!',
+			 'pub_date': int(time.time())})
+	result = mongo.db.user.insert(
+				{'username': 'testuser2',
+				 'email': 'test2@email.com',
+				 'pw_hash': 'pbkdf2:sha256:50000$OsYsSQ2F$be40fe67dc85114d7de5dcafa66df7fbdfdee5ab89c7609cc8455e79564eab1b'})
+	mongo.db.message.insert(
+			{'author_id': ObjectId(result),
+			 'email': 'test2@email.com',
+			 'username': 'testuser2',
+			 'text': 'I DON\'T LIKE THIS PROJECT!',
+			 'pub_date': int(time.time())})
+	result = mongo.db.user.insert(
+				{'username': 'testuser3',
+				 'email': 'test3@email.com',
+				 'pw_hash': 'pbkdf2:sha256:50000$OsYsSQ2F$be40fe67dc85114d7de5dcafa66df7fbdfdee5ab89c7609cc8455e79564eab1b'})
+	mongo.db.message.insert(
+			{'author_id': ObjectId(result),
+			 'email': 'test3@email.com',
+			 'username': 'testuser3',
+			 'text': 'IDK WHAT IM TYPING!',
+			 'pub_date': int(time.time())})
+	result = mongo.db.user.insert(
+				{'username': 'testuser4',
+				 'email': 'test4@email.com',
+				 'pw_hash': 'pbkdf2:sha256:50000$OsYsSQ2F$be40fe67dc85114d7de5dcafa66df7fbdfdee5ab89c7609cc8455e79564eab1b'})
+	mongo.db.message.insert(
+			{'author_id': result,
+			 'email': 'test4@email.com',
+			 'username': 'testuser4',
+			 'text': 'I DON\'T MIND THIS PROJECT!',
+			 'pub_date': int(time.time())})
 
 @app.cli.command('populatedb')
 def populatedb_command():
 	populate_db()
-	print('Populated the databse.')
-
-def query_db(query, args=(), one=False):
-	"""Queries the database and returns a list of dictionaries."""
-	cur = get_db().execute(query, args)
-	rv = cur.fetchall()
-	return (rv[0] if rv else None) if one else rv
-
+	print('Populated the database.')
 
 def get_user_id(username):
 	"""Convenience method to look up the id for a username."""
-	rv = query_db('select user_id from user where username = ?',
-				  [username], one=True)
-	return rv[0] if rv else None
+	rv = mongo.db.user.find_one({'username': username}, {'_id': 1})
+	return rv['_id'] if rv else None
 
 
 def format_datetime(timestamp):
@@ -223,9 +223,7 @@ def gravatar_url(email, size=80):
 def before_request():
 	g.user = None
 	if 'user_id' in session:
-		g.user = query_db('select * from user where user_id = ?',
-						  [session['user_id']], one=True)
-
+		g.user = mongo.db.user.find_one({'_id': ObjectId(session['user_id'])})
 
 @app.route('/')
 def timeline():
@@ -235,44 +233,41 @@ def timeline():
 	"""
 	if not g.user:
 		return redirect(url_for('public_timeline'))
-	return render_template('timeline.html', messages=query_db('''
-		select message.*, user.* from message, user
-		where message.author_id = user.user_id and (
-			user.user_id = ? or
-			user.user_id in (select whom_id from follower
-									where who_id = ?))
-		order by message.pub_date desc limit ?''',
-		[session['user_id'], session['user_id'], PER_PAGE]))
+	followed = mongo.db.follower.find_one(
+		{'who_id': ObjectId(session['user_id'])}, {'whom_id': 1})
+	if followed is None:
+		followed = {'whom_id': []}
+	messages = list(mongo.db.message.find(
+		{'$or': [
+			{'author_id': ObjectId(session['user_id'])},
+			{'author_id': {'$in': followed['whom_id']}}
+		]}).sort('pub_date', -1))
+	return render_template('timeline.html', messages=messages)
 
 
 @app.route('/public')
 def public_timeline():
 	"""Displays the latest messages of all users."""
-	return render_template('timeline.html', messages=query_db('''
-		select message.*, user.* from message, user
-		where message.author_id = user.user_id
-		order by message.pub_date desc limit ?''', [PER_PAGE]))
+	messages = list(mongo.db.message.find().sort('pub_date', -1))
+	return render_template('timeline.html', messages=messages)
 
 
 @app.route('/<username>')
 def user_timeline(username):
 	"""Display's a users tweets."""
-	profile_user = query_db('select * from user where username = ?',
-							[username], one=True)
+	profile_user = mongo.db.user.find_one({'username': username})
+
 	if profile_user is None:
 		abort(404)
 	followed = False
 	if g.user:
-		followed = query_db('''select 1 from follower where
-			follower.who_id = ? and follower.whom_id = ?''',
-			[session['user_id'], profile_user['user_id']],
-			one=True) is not None
-	return render_template('timeline.html', messages=query_db('''
-			select message.*, user.* from message, user where
-			user.user_id = message.author_id and user.user_id = ?
-			order by message.pub_date desc limit ?''',
-			[profile_user['user_id'], PER_PAGE]), followed=followed,
-			profile_user=profile_user)
+		followed = mongo.db.follower.find_one(
+			{'who_id': ObjectId(session['user_id']),
+			 'whom_id': {'$in': [ObjectId(profile_user['_id'])]}}) is not None
+	messages = mongo.db.message.find(
+		{'author_id': ObjectId(profile_user['_id'])}).sort('pub_date', -1)
+	return render_template('timeline.html', messages=messages,
+						   followed=followed, profile_user=profile_user)
 
 
 @app.route('/<username>/follow')
@@ -283,13 +278,11 @@ def follow_user(username):
 	whom_id = get_user_id(username)
 	if whom_id is None:
 		abort(404)
-	db = get_db()
-	db.execute('insert into follower (who_id, whom_id) values (?, ?)',
-			  [session['user_id'], whom_id])
-	db.commit()
+	mongo.db.follower.update(
+		{'who_id': ObjectId(session['user_id'])},
+		{'$push': {'whom_id': whom_id}}, upsert=True)
 	flash('You are now following "%s"' % username)
 	return redirect(url_for('user_timeline', username=username))
-
 
 @app.route('/<username>/unfollow')
 def unfollow_user(username):
@@ -299,13 +292,11 @@ def unfollow_user(username):
 	whom_id = get_user_id(username)
 	if whom_id is None:
 		abort(404)
-	db = get_db()
-	db.execute('delete from follower where who_id=? and whom_id=?',
-			  [session['user_id'], whom_id])
-	db.commit()
+	mongo.db.follower.update(
+		{'who_id': ObjectId(session['user_id'])},
+		{'$pull': {'whom_id': whom_id}})
 	flash('You are no longer following "%s"' % username)
 	return redirect(url_for('user_timeline', username=username))
-
 
 @app.route('/add_message', methods=['POST'])
 def add_message():
@@ -313,19 +304,17 @@ def add_message():
 	if 'user_id' not in session:
 		abort(401)
 	if request.form['text']:
-		db = get_db()
-		db.execute('''insert into message (author_id, text, pub_date)
-		  values (?, ?, ?)''', (session['user_id'], request.form['text'],
-								int(time.time())))
-		db.commit()
+		#db = get_db()
+		#db.execute('''insert into message (author_id, text, pub_date)
+		#  values (?, ?, ?)''', (session['user_id'], request.form['text'],
+		#						int(time.time())))
+		#db.commit()
 		mongo.db.message.insert(
-			{'author_id': session['user_id'],
+			{'author_id': ObjectId(session['user_id']),
+			 'email': g.user['email'],
+			 'username': g.user['username'],
 			 'text': request.form['text'],
 			 'pub_date': int(time.time())})
-		cursor = mongo.db.message.find({})
-		for i in cursor:
-			print (i)
-		print ("message added")
 		flash('Your message was recorded')
 	return redirect(url_for('timeline'))
 
@@ -337,15 +326,14 @@ def login():
 		return redirect(url_for('timeline'))
 	error = None
 	if request.method == 'POST':
-		user = query_db('''select * from user where
-			username = ?''', [request.form['username']], one=True)
+		user = mongo.db.user.find_one({'username': request.form['username']})
 		if user is None:
 			error = 'Invalid username'
 		elif not check_password_hash(user['pw_hash'], request.form['password']):
 			error = 'Invalid password'
 		else:
 			flash('You were logged in')
-			session['user_id'] = user['user_id']
+			session['user_id'] = str(user['_id'])
 			return redirect(url_for('timeline'))
 	return render_template('login.html', error=error)
 
@@ -359,8 +347,7 @@ def register():
 	if request.method == 'POST':
 		if not request.form['username']:
 			error = 'You have to enter a username'
-		elif not request.form['email'] or \
-				'@' not in request.form['email']:
+		elif not request.form['email'] or '@' not in request.form['email']:
 			error = 'You have to enter a valid email address'
 		elif not request.form['password']:
 			error = 'You have to enter a password'
@@ -369,17 +356,10 @@ def register():
 		elif get_user_id(request.form['username']) is not None:
 			error = 'The username is already taken'
 		else:
-			db = get_db()
-			db.execute('''insert into user (
-			  username, email, pw_hash) values (?, ?, ?)''',
-			  [request.form['username'], request.form['email'],
-			   generate_password_hash(request.form['password'])])
-			db.commit()
-			mongo.db.user.insert({'username': request.form['username'], \
-			'email': request.form['email'], \
-			'pw_hash': generate_password_hash(request.form['password'])})
-			#print(mongo.db.user.find_one({'username': 'qwe'}))
-			#print('printed users')			
+			mongo.db.user.insert(
+				{'username': request.form['username'],
+				 'email': request.form['email'],
+				 'pw_hash': generate_password_hash(request.form['password'])})
 			flash('You were successfully registered and can login now')
 			return redirect(url_for('login'))
 	return render_template('register.html', error=error)
@@ -392,8 +372,6 @@ def logout():
 	session.pop('user_id', None)
 	return redirect(url_for('public_timeline'))
 
-
 # add some filters to jinja
 app.jinja_env.filters['datetimeformat'] = format_datetime
 app.jinja_env.filters['gravatar'] = gravatar_url
-
