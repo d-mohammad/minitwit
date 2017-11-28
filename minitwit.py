@@ -32,129 +32,33 @@ app.config.from_object(__name__)
 app.config.from_envvar('MINITWIT_SETTINGS', silent=True)
 mongo = PyMongo(app)
 
-@app.route('/api/statuses/public_timeline', methods=['GET'])
-def publicTimeline():
-	messages = list(mongo.db.message.find().sort('pub_date', -1))
-	#print messages[1].keys()
-	return json.dumps(messages, sort_keys = False, indent = 4, default=json_util.default)
+@app.cli.command('populatedb')
+def populatedb_command():
+	populate_db()
+	print('Populated the database.')
+
+def get_user_id(username):
+	"""Convenience method to look up the id for a username."""
+	rv = mongo.db.user.find_one({'username': username}, {'_id': 1})
+	return rv['_id'] if rv else None
 
 
-@app.route('/api/statuses/home_timeline', methods=['GET'])
-def homeTimeline():
-	if not session['user_id']:
-		return jsonify({"error" : "Unauthorized"}), 401
-	followed = mongo.db.follower.find_one(
-		{'who_id': ObjectId(session['user_id'])}, {'whom_id': 1})
-	messages = list(mongo.db.message.find(
-		{'$or': [
-			{'author_id': ObjectId(session['user_id'])},
-			{'author_id': {'$in': followed['whom_id']}}
-		]}).sort('pub_date', -1))
-	return json.dumps(messages,sort_keys = False, indent = 4, default=json_util.default)
+def format_datetime(timestamp):
+	"""Format a timestamp for display."""
+	return datetime.utcfromtimestamp(timestamp).strftime('%Y-%m-%d @ %H:%M')
 
-@app.route('/api/statuses/user_timeline/<username>', methods=['GET'])
-def userTimeline(username):
-	profile_user = mongo.db.user.find_one({'username': username})
-	whom_id = get_user_id(username)
 
-	if profile_user is None:
-		return jsonify({"status": "Not Found"}), 404
-
-	messages = list(mongo.db.message.find(
-		{'author_id': ObjectId(profile_user['_id'])}).sort('pub_date', -1))
-
-	return json.dumps(messages,sort_keys = False, indent = 4, default=json_util.default)
-
-@app.route('/api/friendships/create', methods=['POST'])
-def create_friendship():
-	if request.method == 'POST':
-		content = request.get_json()
-		whom = content.get("username")
-		whom_id = get_user_id(whom)
-
-		if session['user_id'] is None:
-			return jsonify({"status: Unauthorized"}), 401
-		if whom_id is None:
-			return jsonify({"status: Not Found"}), 404
-
-		mongo.db.follower.update(
-			{'who_id': ObjectId(session['user_id'])},
-			{'$push': {'whom_id': whom_id}}, upsert=True)
-
-	else:
-	   return jsonify({"status: Method Not Allowed"}), 405
-
-	return jsonify({"username": whom, "followed" : "True"}),200
-
-@app.route('/api/friendships/delete/<username>', methods=['DELETE'])
-def delete_friendship(username):
-	if request.method == 'DELETE':
-		whom_id = get_user_id(username)
-
-		if session[user_id] is None:
-			return jsonify({"status: Unauthorized"}), 401
-		if whom_id is None:
-			return jsonify({"status: Not Found"}), 404
-
-		mongo.db.follower.update(
-			{'who_id': ObjectId(session['user_id'])},
-			{'$pull': {'whom_id': whom_id}})
-	else:
-		return jsonify({"status: Method Not Allowed"}), 405
-
-	return jsonify({"username" : username, "followed" : "False"}), 200
-
-@app.route('/api/statuses/update', methods=['POST'])
-def addMessage():
-	content = request.get_json()
-	message = content.get('text')
-	user = mongo.db.user.find_one({'_id': ObjectId(session['user_id'])})
-
-	if user is None:
-		return jsonify({"status: Not Found"}), 404
-	if session['user_id'] is None:
-		return jsonify({"status: Unauthorized"}), 401
-
-	mongo.db.message.insert(
-            {'author_id': ObjectId(session['user_id']),
-             'email': user['email'],
-             'username': user['username'],
-             'text': message,
-             'pub_date': int(time.time())})
-
-	return jsonify({"message" : message}), 200
-
-@app.route('/api/account/verify_credentials', methods=['GET', 'DELETE'])
-def verifyCredentials():
-	if (request.method =='GET'):
-		username = request.args.get('username',default=" ",type=str)
-		user_id = get_user_id(username)
-		password = request.args.get('password',default=" ",type=str)
-
-		user = mongo.db.user.find_one({'username': username})
-
-		if user is None:
-			error = 'Invalid username'
-			return jsonify({"status" : "Bad Request"}, 400)
-		elif not check_password_hash(user['pw_hash'], password):
-			error = 'Invalid password'
-			return jsonify({"status" : "Unauthorized"}, 401)
-		else:
-			session['user_id'] = str(user_id)
-			return jsonify({"username": username, "password":password}), 200
-			
-	elif (request.method == 'DELETE'):
-		print session['user_id']
-		session.pop('user_id', None)
-		return jsonify({"status" : "deleted"}), 200
-	else:
-		return jsonify({"status" : "Method Not Allowed"}), 405
+def gravatar_url(email, size=80):
+	"""Return the gravatar image for the given email address."""
+	return 'https://www.gravatar.com/avatar/%s?d=identicon&s=%d' % \
+		(md5(email.strip().lower().encode('utf-8')).hexdigest(), size)
 
 def populate_db():
 	result = mongo.db.message.delete_many({})
 	print result.deleted_count , "messages deleted"
 	mongo.db.user.drop()
 	print result.deleted_count , "users deleted"
+	mongo.db.follower.drop()
 	#password = asd
 	#pbkdf2:sha256:50000$VkXoNh0W$74f25225aab278pbkdf2:sha256:50000$VkXoNh0W$74f25225aab278bf3ba83921af34604574d5246993429ec26903f5b9875ac18fbf3ba83921af34604574d5246993429ec26903f5b9875ac18f
 	result = mongo.db.user.insert(
@@ -198,56 +102,164 @@ def populate_db():
 			 'text': 'I DON\'T MIND THIS PROJECT!',
 			 'pub_date': int(time.time())})
 
-@app.cli.command('populatedb')
-def populatedb_command():
-	populate_db()
-	print('Populated the database.')
-
-def get_user_id(username):
-	"""Convenience method to look up the id for a username."""
-	rv = mongo.db.user.find_one({'username': username}, {'_id': 1})
-	return rv['_id'] if rv else None
-
-
-def format_datetime(timestamp):
-	"""Format a timestamp for display."""
-	return datetime.utcfromtimestamp(timestamp).strftime('%Y-%m-%d @ %H:%M')
-
-
-def gravatar_url(email, size=80):
-	"""Return the gravatar image for the given email address."""
-	return 'https://www.gravatar.com/avatar/%s?d=identicon&s=%d' % \
-		(md5(email.strip().lower().encode('utf-8')).hexdigest(), size)
-
-
 @app.before_request
 def before_request():
 	g.user = None
 	if 'user_id' in session:
 		g.user = mongo.db.user.find_one({'_id': ObjectId(session['user_id'])})
 
-@app.route('/')
-def timeline():
-	"""Shows a users timeline or if no user is logged in it will
-	redirect to the public timeline.  This timeline shows the user's
-	messages as well as all the messages of followed users.
-	"""
-	if not g.user:
-		return redirect(url_for('public_timeline'))
-	followed = mongo.db.follower.find_one(
-		{'who_id': ObjectId(session['user_id'])}, {'whom_id': 1})
-	if followed is None:
-		followed = {'whom_id': []}
+@app.route('/api/statuses/public_timeline', methods=['GET'])
+def publicTimeline():
+	messages = list(mongo.db.message.find().sort('pub_date', -1))
+	#print messages[1].keys()
+	return json.dumps(messages, sort_keys = False, indent = 4, default=json_util.default)
+
+
+@app.route('/api/statuses/home_timeline', methods=['GET'])
+def homeTimeline():
+	if not session['user_id']:
+		return jsonify({"error" : "Unauthorized"}), 401
+	user = mongo.db.user.find_one({'_id': ObjectId(session['user_id'])})
+
+	#handle users that arent following anyone - will error out otherwise
+	try:
+		following = user['following_id']
+	except: 
+		following = []
+
 	messages = list(mongo.db.message.find(
 		{'$or': [
 			{'author_id': ObjectId(session['user_id'])},
-			{'author_id': {'$in': followed['whom_id']}}
+			{'author_id': {'$in': following}}
+		]}).sort('pub_date', -1))
+
+	return json.dumps(messages,sort_keys = False, indent = 4, default=json_util.default)
+
+@app.route('/api/statuses/user_timeline/<username>', methods=['GET'])
+def userTimeline(username):
+	profile_user = mongo.db.user.find_one({'username': username})
+	whom_id = get_user_id(username)
+
+	if profile_user is None:
+		return jsonify({"status": "Not Found"}), 404
+
+	messages = list(mongo.db.message.find(
+		{'author_id': ObjectId(profile_user['_id'])}).sort('pub_date', -1))
+
+	return json.dumps(messages,sort_keys = False, indent = 4, default=json_util.default)
+
+@app.route('/api/friendships/create', methods=['POST'])
+def create_friendship():
+	if request.method == 'POST':
+		content = request.get_json()
+		whom = content.get("username")
+		whom_id = get_user_id(whom)
+
+		if session['user_id'] is None:
+			return jsonify({"status: Unauthorized"}), 401
+		if whom_id is None:
+			return jsonify({"status: Not Found"}), 404
+
+		mongo.db.user.update(
+			{'_id': ObjectId(session['user_id'])},
+			{'$push': {'following_id': whom_id}}, upsert=True)
+
+	else:
+	   return jsonify({"status: Method Not Allowed"}), 405
+
+	return jsonify({"username": whom, "followed" : "True"}),200
+
+@app.route('/api/friendships/delete/<username>', methods=['DELETE'])
+def delete_friendship(username):
+	if request.method == 'DELETE':
+		whom_id = get_user_id(username)
+
+		if session[user_id] is None:
+			return jsonify({"status: Unauthorized"}), 401
+		if whom_id is None:
+			return jsonify({"status: Not Found"}), 404
+
+		mongo.db.user.update(
+			{'_id': ObjectId(session['user_id'])},
+			{'$pull': {'following_id': whom_id}})
+	else:
+		return jsonify({"status: Method Not Allowed"}), 405
+
+	return jsonify({"username" : username, "followed" : "False"}), 200
+
+@app.route('/api/statuses/update', methods=['POST'])
+def addMessage():
+	content = request.get_json()
+	message = content.get('text')
+	user = mongo.db.user.find_one({'_id': ObjectId(session['user_id'])})
+
+	if user is None:
+		return jsonify({"status: Not Found"}), 404
+	if session['user_id'] is None:
+		return jsonify({"status: Unauthorized"}), 401
+
+	mongo.db.message.insert(
+            {'author_id': ObjectId(session['user_id']),
+             'email': user['email'],
+             'username': user['username'],
+             'text': message,
+             'pub_date': int(time.time())})
+
+	return jsonify({"message" : message}), 200
+
+@app.route('/api/account/verify_credentials', methods=['GET', 'DELETE'])
+def verifyCredentials():
+	if (request.method =='GET'):
+		username = request.args.get('username',default=" ",type=str)
+		user_id = get_user_id(username)
+		password = request.args.get('password',default="asd",type=str)
+				
+		user = mongo.db.user.find_one({'username': username})
+
+		if user is None:
+			error = 'Invalid username'
+			return jsonify({"status" : "Bad Request"}, 400)
+		elif not check_password_hash(user['pw_hash'], password):
+			error = 'Invalid password'
+			return jsonify({"status" : "Unauthorized"}, 401)
+		else:
+			session['user_id'] = str(user_id)
+			return jsonify({"username": username, "password":password}), 200
+			
+	elif (request.method == 'DELETE'):
+		print session['user_id']
+		session.pop('user_id', None)
+		return jsonify({"status" : "deleted"}), 200
+	else:
+		return jsonify({"status" : "Method Not Allowed"}), 405
+
+
+@app.route('/')
+def timeline():
+	if not g.user:
+		return redirect(url_for('public_timeline'))
+	user = mongo.db.user.find_one({'_id': ObjectId(session['user_id'])})
+	#handle users that arent following anyone
+	try:
+		following = user['following_id']
+	except: 
+		following = []
+	
+	
+	if following is None:
+		following = {'whom_id': []}
+	messages = list(mongo.db.message.find(
+		{'$or': [
+			{'author_id': ObjectId(session['user_id'])},
+			{'author_id': {'$in': following}}
 		]}).sort('pub_date', -1))
 	return render_template('timeline.html', messages=messages)
 
 
 @app.route('/public')
 def public_timeline():
+	result = list(mongo.db.follower.find({}))
+	print(json.dumps(result, sort_keys = False, indent = 4, default=json_util.default))
 	"""Displays the latest messages of all users."""
 	messages = list(mongo.db.message.find().sort('pub_date', -1))
 	return render_template('timeline.html', messages=messages)
@@ -262,13 +274,13 @@ def user_timeline(username):
 		abort(404)
 	followed = False
 	if g.user:
-		followed = mongo.db.follower.find_one(
-			{'who_id': ObjectId(session['user_id']),
-			 'whom_id': {'$in': [ObjectId(profile_user['_id'])]}}) is not None
+		following = mongo.db.user.find_one(
+			{'_id': ObjectId(session['user_id']),
+			 'following_id': {'$in': [ObjectId(profile_user['_id'])]}}) is not None
 	messages = mongo.db.message.find(
 		{'author_id': ObjectId(profile_user['_id'])}).sort('pub_date', -1)
 	return render_template('timeline.html', messages=messages,
-						   followed=followed, profile_user=profile_user)
+						   followed=following, profile_user=profile_user)
 
 
 @app.route('/<username>/follow')
@@ -279,10 +291,15 @@ def follow_user(username):
 	whom_id = get_user_id(username)
 	if whom_id is None:
 		abort(404)
-	mongo.db.follower.update(
-		{'who_id': ObjectId(session['user_id'])},
-		{'$push': {'whom_id': whom_id}}, upsert=True)
+	mongo.db.user.update(
+		{'_id': ObjectId(session['user_id'])},
+		{'$push': {'following_id': whom_id}}, upsert=True)
+
+	result = mongo.db.user.find_one({'_id': ObjectId(session['user_id'])})
+	print(json.dumps(result, sort_keys = False, indent = 4, default=json_util.default))
 	flash('You are now following "%s"' % username)
+
+
 	return redirect(url_for('user_timeline', username=username))
 
 @app.route('/<username>/unfollow')
@@ -293,10 +310,11 @@ def unfollow_user(username):
 	whom_id = get_user_id(username)
 	if whom_id is None:
 		abort(404)
-	mongo.db.follower.update(
-		{'who_id': ObjectId(session['user_id'])},
-		{'$pull': {'whom_id': whom_id}})
+	mongo.db.user.update(
+		{'_id': ObjectId(session['user_id'])},
+		{'$pull': {'following_id': whom_id}})
 	flash('You are no longer following "%s"' % username)
+	
 	return redirect(url_for('user_timeline', username=username))
 
 @app.route('/add_message', methods=['POST'])
@@ -305,11 +323,6 @@ def add_message():
 	if 'user_id' not in session:
 		abort(401)
 	if request.form['text']:
-		#db = get_db()
-		#db.execute('''insert into message (author_id, text, pub_date)
-		#  values (?, ?, ?)''', (session['user_id'], request.form['text'],
-		#						int(time.time())))
-		#db.commit()
 		mongo.db.message.insert(
 			{'author_id': ObjectId(session['user_id']),
 			 'email': g.user['email'],
