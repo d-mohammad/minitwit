@@ -35,7 +35,8 @@ mongo = PyMongo(app)
 @app.route('/api/statuses/public_timeline', methods=['GET'])
 def publicTimeline():
 	messages = list(mongo.db.message.find().sort('pub_date', -1))
-	return json.dumps(messages,default=json_util.default)
+	#print messages[1].keys()
+	return json.dumps(messages, sort_keys = False, indent = 4, default=json_util.default)
 
 
 @app.route('/api/statuses/home_timeline', methods=['GET'])
@@ -49,7 +50,7 @@ def homeTimeline():
 			{'author_id': ObjectId(session['user_id'])},
 			{'author_id': {'$in': followed['whom_id']}}
 		]}).sort('pub_date', -1))
-	return json.dumps(messages,default=json_util.default)
+	return json.dumps(messages,sort_keys = False, indent = 4, default=json_util.default)
 
 @app.route('/api/statuses/user_timeline/<username>', methods=['GET'])
 def userTimeline(username):
@@ -62,7 +63,7 @@ def userTimeline(username):
 	messages = list(mongo.db.message.find(
 		{'author_id': ObjectId(profile_user['_id'])}).sort('pub_date', -1))
 
-	return json.dumps(messages,default=json_util.default)	
+	return json.dumps(messages,sort_keys = False, indent = 4, default=json_util.default)
 
 @app.route('/api/friendships/create', methods=['POST'])
 def create_friendship():
