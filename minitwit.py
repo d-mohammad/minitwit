@@ -35,62 +35,26 @@ app.config.from_object(__name__)
 mongo = PyMongo(app)
 Session(app)
 r = redis.Redis(host='localhost', port=6379, db=0)
-r.delete('testuser1')
+
+#clear cache for testing
+#r.flushall()
+@app.before_request
+def before_request():
+	g.user = None
+	if 'user_id' in session:
+		g.user = get_user_by_id(session['user_id'])
 
 @app.cli.command('populatedb')
 def populatedb_command():
 	populate_db()
 	print('Populated the database.')
 
-def get_user_id(username):
-	"""Convenience method to look up the id for a username."""
-	rv = mongo.db.user.find_one({'username': username}, {'_id': 1})
-	return rv['_id'] if rv else None
-
-def get_user_by_username(username):
-	rv = r.get(username)
-
-	if rv is None:
-		rv = mongo.db.user.find_one({'username': username})
-		pickled_object = pickle.dumps(rv)
-		r.setex(username, pickled_object, 60)
-
-	else:
-		print "cached username"
-		return pickle.loads(rv)
-
-	return rv
-
-def get_user_by_id(u_id):
-	rv = r.get(u_id)
-	
-	if rv is None:
-		rv = mongo.db.user.find_one({'_id': ObjectId(u_id)})
-		pickled_object = pickle.dumps(rv)
-		r.setex(u_id, pickled_object, 60)
-		
-	else:
-		print "cached id"
-		return pickle.loads(rv)
-
-	return rv
-
-def format_datetime(timestamp):
-	"""Format a timestamp for display."""
-	return datetime.utcfromtimestamp(timestamp).strftime('%Y-%m-%d @ %H:%M')
-
-
-def gravatar_url(email, size=80):
-	"""Return the gravatar image for the given email address."""
-	return 'https://www.gravatar.com/avatar/%s?d=identicon&s=%d' % \
-		(md5(email.strip().lower().encode('utf-8')).hexdigest(), size)
 
 def populate_db():
 	result = mongo.db.message.delete_many({})
 	print result.deleted_count , "messages deleted"
-	mongo.db.user.drop()
-	print result.deleted_count , "users deleted"
-	mongo.db.follower.drop()
+	result = mongo.db.user.delete_many({})
+	print result.deleted_count, "users deleted"
 	#password = asd
 	#pbkdf2:sha256:50000$VkXoNh0W$74f25225aab278pbkdf2:sha256:50000$VkXoNh0W$74f25225aab278bf3ba83921af34604574d5246993429ec26903f5b9875ac18fbf3ba83921af34604574d5246993429ec26903f5b9875ac18f
 	result = mongo.db.user.insert(
@@ -134,25 +98,75 @@ def populate_db():
 			 'text': 'I DON\'T MIND THIS PROJECT!',
 			 'pub_date': int(time.time())})
 
-@app.before_request
-def before_request():
-	g.user = None
-	if 'user_id' in session:
-		print session['user_id']
-		g.user = get_user_by_id(session['user_id'])
+def get_user_id(username):
+	#check cache for id corresponding to username
+	#if not there, query and save into cache with name = username, value = id
+	rv = r.get(username)
+
+	if rv is None:
+		rv = mongo.db.user.find_one({'username': username})
+		r.setex(username, str(rv['_id']),60)
+		return rv['_id']
+	else:
+		return ObjectId(rv)
+	
+
+
+def get_user_by_username(username):
+	rv = r.get(username)
+
+	if rv is None:
+		rv = mongo.db.user.find_one({'username': username})
+		pickled_object = pickle.dumps(rv)
+		r.setex(username, pickled_object, 60)
+	else:
+		return pickle.loads(rv)
+
+	return rv
+
+def get_user_by_id(u_id):
+	rv = r.get(u_id)
+	
+	if rv is None:
+		rv = mongo.db.user.find_one({'_id': ObjectId(u_id)})
+		pickled_object = pickle.dumps(rv)
+		r.setex(u_id, pickled_object, 60)
+		
+	else:
+		return pickle.loads(rv)
+
+	return rv
+
+def format_datetime(timestamp):
+	"""Format a timestamp for display."""
+	return datetime.utcfromtimestamp(timestamp).strftime('%Y-%m-%d @ %H:%M')
+
+
+def gravatar_url(email, size=80):
+	"""Return the gravatar image for the given email address."""
+	return 'https://www.gravatar.com/avatar/%s?d=identicon&s=%d' % \
+		(md5(email.strip().lower().encode('utf-8')).hexdigest(), size)
+
 
 @app.route('/api/statuses/public_timeline', methods=['GET'])
 def publicTimeline():
-	messages = list(mongo.db.message.find().sort('pub_date', -1))
-	#print messages[1].keys()
-	return json.dumps(messages, sort_keys = False, indent = 4, default=json_util.default)
+	cachekey = 'publictimeline'
+	messages= r.get(cachekey)
 
+	if messages is None:
+		messages = list(mongo.db.message.find().sort('pub_date', -1))
+		pickled_object = pickle.dumps(messages)
+		r.setex(cachekey, pickled_object, 60)
+	else:
+		messages = pickle.loads(messages)
+	
+	return json.dumps(messages, sort_keys = False, indent = 4, default=json_util.default)
 
 @app.route('/api/statuses/home_timeline', methods=['GET'])
 def homeTimeline():
 	if session['user_id'] is None:
 		return jsonify({"error" : "Unauthorized"}), 401
-	user = mongo.db.user.find_one({'_id': ObjectId(session['user_id'])})
+	user = get_user_by_id(str(ObjectId(session['user_id'])))
 
 	#handle users that arent following anyone - will error out otherwise
 	try:
@@ -160,26 +174,53 @@ def homeTimeline():
 	except: 
 		following = []
 
-	messages = list(mongo.db.message.find(
+	cachekey = 'hometimeline' + str(ObjectId(session['user_id']))
+	messages = r.get(cachekey)
+
+	if messages is None:
+		messages  = list(mongo.db.message.find(
 		{'$or': [
 			{'author_id': ObjectId(session['user_id'])},
 			{'author_id': {'$in': following}}
 		]}).sort('pub_date', -1))
+		
+		pickled_object = pickle.dumps(messages)
+		r.setex(cachekey, pickled_object, 30)
+	else:
+		messages = pickle.loads(messages)
 
 	return json.dumps(messages,sort_keys = False, indent = 4, default=json_util.default)
 
+
 @app.route('/api/statuses/user_timeline/<username>', methods=['GET'])
 def userTimeline(username):
-	profile_user = mongo.db.user.find_one({'username': username})
+	profile_user_id = get_user_id(username)
+	profile_user = get_user_by_id(profile_user_id)
 	whom_id = get_user_id(username)
 
 	if profile_user is None:
 		return jsonify({"status": "Not Found"}), 404
+	if whom_id is None:
+		return jsonify({"status": "Not Found"}), 404
 
-	messages = list(mongo.db.message.find(
-		{'author_id': ObjectId(profile_user['_id'])}).sort('pub_date', -1))
+	cachekey = 'usertimeline' + str(ObjectId(profile_user['_id']))
+	messages = r.get(cachekey)
+
+	#if not cached, cache it
+	if messages is None:
+		messages  = list(mongo.db.message.find(
+			{'author_id': ObjectId(profile_user['_id'])}).sort('pub_date', -1))
+		pickled_object = pickle.dumps(messages)
+		r.setex(cachekey, pickled_object, 60)
+		#has to get result again after caching
+	
+	#if cached, unpickle and return
+	else:
+		messages = pickle.loads(messages)
 
 	return json.dumps(messages,sort_keys = False, indent = 4, default=json_util.default)
+
+
 
 @app.route('/api/friendships/create', methods=['POST'])
 def create_friendship():
@@ -197,6 +238,8 @@ def create_friendship():
 			{'_id': ObjectId(session['user_id'])},
 			{'$push': {'following_id': whom_id}}, upsert=True)
 
+		r.delete(session['user_id'])
+		r.delete('hometimeline' + str(ObjectId(session['user_id'])))
 	else:
 	   return jsonify({"status: Method Not Allowed"}), 405
 
@@ -207,7 +250,7 @@ def delete_friendship(username):
 	if request.method == 'DELETE':
 		whom_id = get_user_id(username)
 
-		if session[user_id] is None:
+		if session['user_id'] is None:
 			return jsonify({"status: Unauthorized"}), 401
 		if whom_id is None:
 			return jsonify({"status: Not Found"}), 404
@@ -215,6 +258,9 @@ def delete_friendship(username):
 		mongo.db.user.update(
 			{'_id': ObjectId(session['user_id'])},
 			{'$pull': {'following_id': whom_id}})
+
+		r.delete(session['user_id'])
+		r.delete('hometimeline' + str(ObjectId(session['user_id'])))
 	else:
 		return jsonify({"status: Method Not Allowed"}), 405
 
@@ -224,7 +270,7 @@ def delete_friendship(username):
 def addMessage():
 	content = request.get_json()
 	message = content.get('text')
-	user = mongo.db.user.find_one({'_id': ObjectId(session['user_id'])})
+	user = get_user_by_id(str(ObjectId(session['user_id'])))
 
 	if user is None:
 		return jsonify({"status: Not Found"}), 404
@@ -238,6 +284,9 @@ def addMessage():
              'text': message,
              'pub_date': int(time.time())})
 
+	r.delete('usertimeline' + str(ObjectId(session['user_id'])))
+	r.delete('hometimeline' + str(ObjectId(session['user_id'])))
+
 	return jsonify({"message" : message}), 200
 
 @app.route('/api/account/verify_credentials', methods=['GET', 'DELETE'])
@@ -247,7 +296,7 @@ def verifyCredentials():
 		user_id = get_user_id(username)
 		password = request.args.get('password',default="asd",type=str)
 				
-		user = mongo.db.user.find_one({'username': username})
+		user = get_user_by_id(user_id)
 
 		if user is None:
 			error = 'Invalid username'
@@ -281,6 +330,7 @@ def timeline():
 	if following is None:
 		following = {'whom_id': []}
 
+	r.delete('hometimeline' + str(ObjectId(session['user_id'])))
 	cachekey = 'hometimeline' + str(ObjectId(session['user_id']))
 	messages = r.get(cachekey)
 
@@ -290,6 +340,8 @@ def timeline():
 			{'author_id': ObjectId(session['user_id'])},
 			{'author_id': {'$in': following}}
 		]}).sort('pub_date', -1))
+		json.dumps(messages, sort_keys = False, indent = 4, default=json_util.default)
+
 		pickled_object = pickle.dumps(messages)
 		r.setex(cachekey, pickled_object, 30)
 	else:
@@ -317,11 +369,12 @@ def public_timeline():
 @app.route('/<username>')
 def user_timeline(username):
 	"""Display's a users tweets."""
-	profile_user = get_user_by_username(username)
+	profile_user_id = get_user_id(username)
+	profile_user = get_user_by_id(profile_user_id)
 
 	if profile_user is None:
 		abort(404)
-	followed = False
+	following = False
 	if g.user:
 		following = mongo.db.user.find_one(
 			{'_id': ObjectId(session['user_id']),
@@ -330,10 +383,9 @@ def user_timeline(username):
 	#get messages in cache
 	cachekey = 'usertimeline' + str(ObjectId(profile_user['_id']))
 	messages = r.get(cachekey)
-	
+
 	#if not cached, cache it
 	if messages is None:
-		print '==================='
 		messages  = list(mongo.db.message.find(
 			{'author_id': ObjectId(profile_user['_id'])}).sort('pub_date', -1))
 		pickled_object = pickle.dumps(messages)
@@ -360,6 +412,7 @@ def follow_user(username):
 		{'_id': ObjectId(session['user_id'])},
 		{'$push': {'following_id': whom_id}}, upsert=True)
 
+	r.delete(session['user_id'])
 	r.delete('hometimeline' + str(ObjectId(session['user_id'])))
 	flash('You are now following "%s"' % username)
 	return redirect(url_for('user_timeline', username=username))
@@ -375,6 +428,8 @@ def unfollow_user(username):
 	mongo.db.user.update(
 		{'_id': ObjectId(session['user_id'])},
 		{'$pull': {'following_id': whom_id}})
+
+	r.delete(session['user_id'])
 	r.delete('hometimeline' + str(ObjectId(session['user_id'])))
 	flash('You are no longer following "%s"' % username)
 	
@@ -392,7 +447,7 @@ def add_message():
 			 'username': g.user['username'],
 			 'text': request.form['text'],
 			 'pub_date': int(time.time())})
-		#invalide cached timelines
+		#invalidate cached timelines
 		r.delete('usertimeline' + str(ObjectId(session['user_id'])))
 		r.delete('hometimeline' + str(ObjectId(session['user_id'])))
 		flash('Your message was recorded')
@@ -406,14 +461,15 @@ def login():
 		return redirect(url_for('timeline'))
 	error = None
 	if request.method == 'POST':
-		user = get_user_by_username(request.form['username'])
+		user_id = get_user_id(request.form['username'])
+		user = get_user_by_id(ObjectId(user_id))
 		if user is None:
 			error = 'Invalid username'
 		elif not check_password_hash(user['pw_hash'], request.form['password']):
 			error = 'Invalid password'
 		else:
 			flash('You were logged in')
-			session['user_id'] = str(user['_id'])
+			session['user_id'] = str(user['_id']) 
 			return redirect(url_for('timeline'))
 	return render_template('login.html', error=error)
 
