@@ -15,22 +15,27 @@ from hashlib import md5
 from datetime import datetime
 from flask import Flask, request, session, url_for, redirect, \
 	 render_template, abort, g, flash, _app_ctx_stack, jsonify, Response
+from flask_sessionstore import Session
 from werkzeug import check_password_hash, generate_password_hash
 from flask_pymongo import PyMongo
 from bson.objectid import ObjectId
 from bson import json_util
-
+import redis
+import pickle
 # configuration
 DATABASE = '/tmp/minitwit.db'
 PER_PAGE = 30
 DEBUG = True
 SECRET_KEY = b'_5#y2L"F4Q8z\n\xec]/'
+SESSION_TYPE = 'redis'
 
 # create our little application :)
 app = Flask('minitwit')
 app.config.from_object(__name__)
-app.config.from_envvar('MINITWIT_SETTINGS', silent=True)
 mongo = PyMongo(app)
+Session(app)
+r = redis.Redis(host='localhost', port=6379, db=0)
+r.delete('testuser1')
 
 @app.cli.command('populatedb')
 def populatedb_command():
@@ -42,6 +47,33 @@ def get_user_id(username):
 	rv = mongo.db.user.find_one({'username': username}, {'_id': 1})
 	return rv['_id'] if rv else None
 
+def get_user_by_username(username):
+	rv = r.get(username)
+
+	if rv is None:
+		rv = mongo.db.user.find_one({'username': username})
+		pickled_object = pickle.dumps(rv)
+		r.setex(username, pickled_object, 60)
+
+	else:
+		print "cached username"
+		return pickle.loads(rv)
+
+	return rv
+
+def get_user_by_id(u_id):
+	rv = r.get(u_id)
+	
+	if rv is None:
+		rv = mongo.db.user.find_one({'_id': ObjectId(u_id)})
+		pickled_object = pickle.dumps(rv)
+		r.setex(u_id, pickled_object, 60)
+		
+	else:
+		print "cached id"
+		return pickle.loads(rv)
+
+	return rv
 
 def format_datetime(timestamp):
 	"""Format a timestamp for display."""
@@ -106,7 +138,8 @@ def populate_db():
 def before_request():
 	g.user = None
 	if 'user_id' in session:
-		g.user = mongo.db.user.find_one({'_id': ObjectId(session['user_id'])})
+		print session['user_id']
+		g.user = get_user_by_id(session['user_id'])
 
 @app.route('/api/statuses/public_timeline', methods=['GET'])
 def publicTimeline():
@@ -117,7 +150,7 @@ def publicTimeline():
 
 @app.route('/api/statuses/home_timeline', methods=['GET'])
 def homeTimeline():
-	if not session['user_id']:
+	if session['user_id'] is None:
 		return jsonify({"error" : "Unauthorized"}), 401
 	user = mongo.db.user.find_one({'_id': ObjectId(session['user_id'])})
 
@@ -226,8 +259,7 @@ def verifyCredentials():
 			session['user_id'] = str(user_id)
 			return jsonify({"username": username, "password":password}), 200
 			
-	elif (request.method == 'DELETE'):
-		print session['user_id']
+	elif (request.method == 'DELETE'):		
 		session.pop('user_id', None)
 		return jsonify({"status" : "deleted"}), 200
 	else:
@@ -238,37 +270,54 @@ def verifyCredentials():
 def timeline():
 	if not g.user:
 		return redirect(url_for('public_timeline'))
-	user = mongo.db.user.find_one({'_id': ObjectId(session['user_id'])})
+
+	user = get_user_by_id(str(ObjectId(session['user_id'])))
 	#handle users that arent following anyone
 	try:
 		following = user['following_id']
 	except: 
 		following = []
 	
-	
 	if following is None:
 		following = {'whom_id': []}
-	messages = list(mongo.db.message.find(
+
+	cachekey = 'hometimeline' + str(ObjectId(session['user_id']))
+	messages = r.get(cachekey)
+
+	if messages is None:
+		messages  = list(mongo.db.message.find(
 		{'$or': [
 			{'author_id': ObjectId(session['user_id'])},
 			{'author_id': {'$in': following}}
 		]}).sort('pub_date', -1))
+		pickled_object = pickle.dumps(messages)
+		r.setex(cachekey, pickled_object, 30)
+	else:
+		messages = pickle.loads(messages)
+
 	return render_template('timeline.html', messages=messages)
 
 
 @app.route('/public')
 def public_timeline():
-	result = list(mongo.db.follower.find({}))
-	print(json.dumps(result, sort_keys = False, indent = 4, default=json_util.default))
 	"""Displays the latest messages of all users."""
-	messages = list(mongo.db.message.find().sort('pub_date', -1))
+	cachekey = 'publictimeline'
+	messages = r.get(cachekey)
+
+	if messages is None:
+		messages = list(mongo.db.message.find().sort('pub_date', -1))
+		pickled_object = pickle.dumps(messages)
+		r.setex(cachekey, pickled_object, 60)
+	else:
+		messages = pickle.loads(messages)
+
 	return render_template('timeline.html', messages=messages)
 
 
 @app.route('/<username>')
 def user_timeline(username):
 	"""Display's a users tweets."""
-	profile_user = mongo.db.user.find_one({'username': username})
+	profile_user = get_user_by_username(username)
 
 	if profile_user is None:
 		abort(404)
@@ -277,8 +326,24 @@ def user_timeline(username):
 		following = mongo.db.user.find_one(
 			{'_id': ObjectId(session['user_id']),
 			 'following_id': {'$in': [ObjectId(profile_user['_id'])]}}) is not None
-	messages = mongo.db.message.find(
-		{'author_id': ObjectId(profile_user['_id'])}).sort('pub_date', -1)
+
+	#get messages in cache
+	cachekey = 'usertimeline' + str(ObjectId(profile_user['_id']))
+	messages = r.get(cachekey)
+	
+	#if not cached, cache it
+	if messages is None:
+		print '==================='
+		messages  = list(mongo.db.message.find(
+			{'author_id': ObjectId(profile_user['_id'])}).sort('pub_date', -1))
+		pickled_object = pickle.dumps(messages)
+		r.setex(cachekey, pickled_object, 60)
+		#has to get result again after caching
+	
+	#if cached, unpickle and return
+	else:
+		messages = pickle.loads(messages)
+
 	return render_template('timeline.html', messages=messages,
 						   followed=following, profile_user=profile_user)
 
@@ -295,11 +360,8 @@ def follow_user(username):
 		{'_id': ObjectId(session['user_id'])},
 		{'$push': {'following_id': whom_id}}, upsert=True)
 
-	result = mongo.db.user.find_one({'_id': ObjectId(session['user_id'])})
-	print(json.dumps(result, sort_keys = False, indent = 4, default=json_util.default))
+	r.delete('hometimeline' + str(ObjectId(session['user_id'])))
 	flash('You are now following "%s"' % username)
-
-
 	return redirect(url_for('user_timeline', username=username))
 
 @app.route('/<username>/unfollow')
@@ -313,6 +375,7 @@ def unfollow_user(username):
 	mongo.db.user.update(
 		{'_id': ObjectId(session['user_id'])},
 		{'$pull': {'following_id': whom_id}})
+	r.delete('hometimeline' + str(ObjectId(session['user_id'])))
 	flash('You are no longer following "%s"' % username)
 	
 	return redirect(url_for('user_timeline', username=username))
@@ -329,6 +392,9 @@ def add_message():
 			 'username': g.user['username'],
 			 'text': request.form['text'],
 			 'pub_date': int(time.time())})
+		#invalide cached timelines
+		r.delete('usertimeline' + str(ObjectId(session['user_id'])))
+		r.delete('hometimeline' + str(ObjectId(session['user_id'])))
 		flash('Your message was recorded')
 	return redirect(url_for('timeline'))
 
@@ -340,7 +406,7 @@ def login():
 		return redirect(url_for('timeline'))
 	error = None
 	if request.method == 'POST':
-		user = mongo.db.user.find_one({'username': request.form['username']})
+		user = get_user_by_username(request.form['username'])
 		if user is None:
 			error = 'Invalid username'
 		elif not check_password_hash(user['pw_hash'], request.form['password']):
